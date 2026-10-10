@@ -198,7 +198,7 @@ README.md                        the human guide
 
 | Task | PR | Status | Rung split (local / claude lines) |
 |---|---|---|---|
-| 0 Plan and README guide | this PR | open | n/a |
+| 0 Plan and README guide | #1 | ready | n/a |
 | 1 | | | |
 | 2 | | | |
 | 3 | | | |
