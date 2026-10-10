@@ -1,0 +1,7 @@
+.worktrees/
+__pycache__/
+.venv/
+*.pyc
+.pytest_cache/
+# per-machine copy of .agents/skills when symlinks are unavailable (Windows)
+# harness-init adds .claude/skills/ here on such machines
