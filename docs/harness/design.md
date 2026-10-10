@@ -83,13 +83,20 @@ unchanged between runners. Only the runner changes:
 
 | Rung | Runner | Cost |
 |---|---|---|
-| 1..n | each configured host, in order | electricity |
-| n+1 | Agent subagent, `model: haiku`, same worktree | cheap subscription |
-| n+2 | Agent subagent, `model: sonnet` | mid |
-| last | coordinator does it | Opus/Fable |
+| 1 | each configured local host, in order | electricity |
+| 2 | free-tier providers with `data_policy: private` | free, volatile |
+| 3 | free-tier providers with `data_policy: trains`, only when the project allows | free, your code leaves |
+| 4 | Agent subagent, `model: haiku`, same worktree | cheap subscription |
+| 5 | Agent subagent, `model: sonnet` | mid |
+| 6 | coordinator does it | Opus/Fable |
 
-A rung is skipped when: host unreachable, nonzero exit, time box hit (default 15 minutes), or the
-acceptance command fails after one retry. Before each retry the worktree is reset to the committed
+Local first because it is private and already paid for in hardware. A bench may reorder rungs 1
+to 3 for a project when a free model clearly beats the local one.
+
+A rung is skipped when: host unreachable, quota exhausted, nonzero exit, time box hit (default
+15 minutes), or the acceptance command fails after one retry. A quota or connection error puts
+the rung in cooldown until its window resets, recorded in `~/.local/state/harness/quota.json`,
+so there is no retry storm and the rung returns by itself. Before each retry the worktree is reset to the committed
 red test (`git restore . && git clean -fd`) so no rung inherits the previous rung's mess. The
 plan records which rung landed each step. A setup with zero hosts has a ladder that starts at
 Haiku; nothing else changes.
@@ -145,11 +152,19 @@ It scores pass rate, wall time and tokens per second, writes `docs/harness/model
 the `roles:` section of `harness.yaml`. A model below two of three passes is not in the ladder.
 Running stats from `local-run` refine the choice over time.
 
-### D10. Only Claude Code as runner, for now
+### D10. Runners: Claude Code first, OpenCode as the gateway to free tiers
 
-Hosts can also launch OpenCode, Codex and others against the same models. One runner means one
-prompt format, one JSON contract, one allowed-tools model. `harness.yaml` has a `runner:` field
-so a second runner is a one-line change after the bench shows a reason.
+Claude Code is the primary runner on local hosts: one prompt format, one JSON contract, one
+allowed-tools model. OpenCode is the second runner, because it alone fronts nearly every free or
+cheap cloud tier (OpenCode Zen's rotating free models, Gemini, DeepSeek, Kimi, Moonshot) plus
+local servers through one provider configuration, reads `.agents/skills` natively, and runs
+headless with `opencode run`. Codex CLI, Kimi Code CLI and others are not runners until a bench
+shows a win over what OpenCode already reaches.
+
+Cloud providers are per user, never per project: `~/.config/harness/providers.yaml` lists each
+with `runner`, `model`, `data_policy: private | trains` and `quota` shape. Free tiers change
+monthly and several train on submitted code, so a `trains` provider is skipped on a private
+repository unless the project sets `allow_training_providers: true`.
 
 ### D11. Two MCP servers, with an honest split of what local models may do
 
@@ -209,15 +224,24 @@ the next tick resumes from the file. Ultracode and `lfg` are off by default.
 
 Each tick reads subscription usage. Above a threshold in `harness.yaml` (default 80% of the
 five-hour window) only local rungs run, critics pause and the loop sleeps longer. A manual
-`budget: low` in `run.md` overrides. If usage data turns out unreadable, the loop falls back to
-surviving limit errors, which the durable state already allows.
+`budget: low` in `run.md` overrides. When the window is exhausted the loop sleeps until the
+reset time instead of failing into the limit. If usage data turns out unreadable, the loop falls
+back to surviving limit errors, which the durable state already allows. The loop runs in the
+interactive session only; a headless timer tick on a host is a possible later opt-in, not built
+now.
 
 ### D17. Watching a run and the local/Claude split
 
-Every step logs rung, host, model, tokens in and out, wall time and committed lines.
-`harness status` prints a table; a live page is regenerated each tick. Both show, per project,
-steps, commits and lines by local versus Claude tier, token totals, and failures and fallbacks
-per model.
+Every step logs rung, runner, host class, model, tokens in and out, wall time, committed lines
+and critic rounds. The record travels with the code: one file per step in
+`docs/harness/stats/<step-id>.json`, written on the step's own branch so it merges with the PR
+and never conflicts with a parallel step. Raw per-machine logs stay in
+`~/.local/state/harness/`. Host classes, never machine names, appear in committed stats:
+`local-gpu-strong`, `local-gpu-weak`, `opencode-zen:<model>`, `haiku`, and so on.
+`harness status` aggregates the directory into a table; a live page is regenerated each tick.
+Both show steps, commits and lines by local versus free tier versus Claude tier, token totals,
+and failures and fallbacks per model. This is how a mixed team sees the split across machines
+and users with no shared infrastructure.
 
 ### D18. Hosts per machine, roles per project
 
@@ -245,6 +269,23 @@ workers from the moment `local-run` v2 exists.
 
 Nothing secret lives in the repository by design: hosts in `~/.config`, books in a private
 literature repository.
+
+### D22. GPU backend awareness: detect and warn, never mutate
+
+Ollama ships CUDA, ROCm and Vulkan builds; Lemonade picks a llama.cpp backend per recipe. A
+wrong build means CPU spill and minutes per step. `harness init` and `harness doctor` detect the
+accelerator (`nvidia-smi`, `rocm-smi`, `vulkaninfo`) and the server's active backend (Ollama
+`/api/ps` reports VRAM use, Lemonade health reports device and launch command) and warn with a
+one-line fix when a model runs on the CPU. The bench records backend and tokens per second per
+model. Nothing is installed or changed automatically.
+
+### D23. Later joiners use the same command
+
+`harness init` in a project that already carries the layer runs only the machine side: plugin
+and pinned versions, `hosts.yaml` and `providers.yaml` through a short wizard (detect Ollama or
+Lemonade, offer OpenCode Zen signup with the data-policy flag, print install hints), link or copy
+`.claude/skills`, bench what is present, then print the effective ladder for this project on this
+machine. Under ten minutes with nothing local.
 
 ## Facts to verify during the build, not decisions
 

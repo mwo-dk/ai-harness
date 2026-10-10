@@ -54,14 +54,16 @@ README.md                        the human guide
 ### Task 1: Repository skeleton and schemas
 
 **Files:**
-- Create: `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `pyproject.toml`, `src/ai_harness/__init__.py`, `src/ai_harness/config.py`, `templates/harness.yaml`, `templates/hosts.yaml`, `.github/workflows/ci.yml`
+- Create: `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `pyproject.toml`, `src/ai_harness/__init__.py`, `src/ai_harness/config.py`, `templates/harness.yaml`, `templates/hosts.yaml`, `templates/providers.yaml`, `.github/workflows/ci.yml`
 - Test: `tests/test_config.py`
 
 **Interfaces:**
 - Produces: `config.load_project(path) -> ProjectConfig` with fields `roles: dict[str, Runner]`, `ladder: list[Rung]`, `bar: str`, `budget_threshold: float`, `plugins: dict[str, str]`, `runner: Literal["claude"]`.
-- Produces: `config.load_hosts(path=None) -> list[Host]` with `Host(name, ssh, launcher: Literal["lemonade","ollama","none"], base_url, worktree_root)`; missing file returns `[]`.
+- Produces: `config.load_hosts(path=None) -> list[Host]` with `Host(name, ssh, launcher: Literal["lemonade","ollama","none"], base_url, worktree_root, roles: list[str] | None)`; missing file returns `[]`.
+- Produces: `config.load_providers(path=None) -> list[Provider]` with `Provider(name, runner: Literal["opencode"], model, data_policy: Literal["private","trains"], quota: Quota | None)`; missing file returns `[]`.
+- Produces: `config.effective_ladder(project, hosts, providers, repo_private: bool) -> list[Rung]` applying D4 order and the `trains` gate.
 
-**Acceptance:** `uv run pytest tests/test_config.py` passes on both CI runners; `claude plugin validate .` passes; a `hosts.yaml` with zero hosts loads to an empty list and a `harness.yaml` without `ladder:` gets the default ladder `[haiku, sonnet, coordinator]`.
+**Acceptance:** `uv run pytest tests/test_config.py` passes on both CI runners; `claude plugin validate .` passes; a `hosts.yaml` with zero hosts loads to an empty list and a `harness.yaml` without `ladder:` gets the default ladder `[haiku, sonnet, coordinator]`; a `trains` provider is absent from the effective ladder when `repo_private=True` and `allow_training_providers` is unset.
 
 - [ ] Plan with `/ce-plan`, build, PR, critic gate, merge.
 
@@ -82,16 +84,18 @@ README.md                        the human guide
 ### Task 3: `local-run` v2
 
 **Files:**
-- Create: `src/ai_harness/hosts.py`, `src/ai_harness/worktree.py`, `src/ai_harness/ladder.py`, `src/ai_harness/local_run.py`
+- Create: `src/ai_harness/hosts.py`, `src/ai_harness/worktree.py`, `src/ai_harness/ladder.py`, `src/ai_harness/local_run.py`, `src/ai_harness/runners/{claude.py,opencode.py}`, `src/ai_harness/quota.py`
 - Modify: `skills/delegate-local/SKILL.md`
 - Test: `tests/test_ladder.py`, `tests/test_worktree.py`, `tests/test_local_run.py`, `tests/fake_llm.py`
 
 **Interfaces:**
 - Produces: `local-run "<task>" [--branch B] [--timebox 900]`: guard (branch has a failing-test commit ahead of default, worktree clean), push branch, for each rung: ensure host worktree, run launcher in `-p` JSON mode with the allowed-tools list, time box, fetch, run acceptance, on failure reset and next rung; log one JSON line per attempt to `~/.local/state/harness/runs.jsonl` with `step, rung, host, model, tokens_in, tokens_out, ms, lines, result`.
 - Produces: `ladder.run(task, rungs, on_attempt) -> Attempt` used by Task 9.
+- Produces: `runners.Runner` protocol `run(task, cwd, model, allowed_tools, timebox) -> RunResult(exit_code, text, tokens_in, tokens_out, ms)`, implemented by `ClaudeRunner` (`claude -p --output-format json`) and `OpenCodeRunner` (`opencode run --model <provider/model> --format json`).
+- Produces: `quota.cooldown(rung, until)` and `quota.is_cool(rung) -> bool` backed by `~/.local/state/harness/quota.json`; a 429 or connection error cools the rung until its window reset or 30 minutes when unknown.
 - Allowed tools for workers: `Bash(cargo *)`, `Bash(dotnet *)`, `Bash(npm *)`, `Bash(pnpm *)`, `Bash(npx *)`, `Bash(uv *)`, `Bash(git status*)`, `Bash(git diff*)`, `Bash(git add *)`, `Bash(git commit *)`, `Bash(git push origin HEAD:<branch>)`, `Bash(ls *)`.
 
-**Acceptance:** with a fake host (`HARNESS_FAKE_HOSTS=1` points ssh at a local subprocess and the launcher at `tests/fake_llm.py`), a task whose fake worker fails on rung 1 and succeeds on rung 2 ends with the branch green, the worktree reset between rungs, and two log lines. The guard refuses a branch with no red commit with the message `local-run: no failing test committed on <branch>; write the red test first`. Verified by hand once against a real host: `lemonade launch claude -- -p` passes flags through, or the documented fallback is used and recorded in `design.md`.
+**Acceptance:** with a fake host (`HARNESS_FAKE_HOSTS=1` points ssh at a local subprocess and the launcher at `tests/fake_llm.py`), a task whose fake worker fails on rung 1 and succeeds on rung 2 ends with the branch green, the worktree reset between rungs, and two log lines. A fake provider rung returning 429 is skipped, recorded in `quota.json` with a reset time, and skipped again without a call on the next run until that time. `OpenCodeRunner` passes the same task text and produces the same `RunResult` shape as `ClaudeRunner` against the fake. The guard refuses a branch with no red commit with the message `local-run: no failing test committed on <branch>; write the red test first`. Verified by hand once against a real host: `lemonade launch claude -- -p` passes flags through, or the documented fallback is used and recorded in `design.md`.
 
 - [ ] Plan, build, PR, gate, merge. First task where `[local]` steps run through the previous `local-run`.
 
@@ -103,7 +107,7 @@ README.md                        the human guide
 
 **Interfaces:**
 - Consumes: `hosts.py`, `ladder.py`, `fake_llm.py`.
-- Produces: `harness bench [--stack S] [--host H]` writes `docs/harness/models.md` and updates `roles:` in `harness.yaml` with `coder`, `fast_draft`, `embed`, `critic_local` (empty when nothing passes). Score per model: `passes/3`, median wall seconds, tokens per second. Threshold: fewer than 2 of 3 passes excludes the model from the ladder.
+- Produces: `harness bench [--stack S] [--host H] [--provider P]` writes `docs/harness/models.md` and updates `roles:` in `harness.yaml` with `coder`, `fast_draft`, `embed`, `critic_local` (empty when nothing passes). Score per model: `passes/3`, median wall seconds, tokens per second, backend (`cuda`, `rocm`, `vulkan`, `cpu`, `cloud`). Providers are benched through `OpenCodeRunner` with the same tasks. Threshold: fewer than 2 of 3 passes excludes the model from the ladder.
 
 **Acceptance:** against the fake endpoint configured to pass 3, 2 and 1 tasks for three fake models, the generated `models.md` lists all three and `harness.yaml` includes exactly the first two in `ladder:`; with zero hosts the command prints `bench: no hosts configured` and exits 0 without writing.
 
@@ -145,9 +149,9 @@ README.md                        the human guide
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `harness init` in a repository: detect (stack, hosts, launchers, plugin versions, symlink support, repository visibility), ask (project kind, bar candidates, literature yes/no, collaborators), provision (`harness.yaml`, `AGENTS.md` under 60 lines, `.agents/skills/` plus link or copy, `docs/harness/`, branch protection via `gh api`, bench offer), verify (`harness doctor`). Idempotent: a second run changes nothing and prints `init: up to date`.
+- Produces: `harness init` in a repository: detect (stack, hosts, launchers, accelerator and server backend per D22, plugin versions, symlink support, repository visibility, existing project layer), ask (project kind, bar candidates, literature yes/no, collaborators; on a machine with no `hosts.yaml` or `providers.yaml`, a short wizard that detects Ollama or Lemonade, offers OpenCode Zen signup with the data-policy flag, and prints install hints), provision (`harness.yaml`, `AGENTS.md` under 60 lines, `.agents/skills/` plus link or copy, `docs/harness/`, branch protection via `gh api`, bench offer), verify (`harness doctor`, print the effective ladder for this machine). Idempotent: a second run changes nothing and prints `init: up to date`. Joiner mode (D23): when the layer exists, only the machine side runs.
 
-**Acceptance:** in a temporary git repository with zero hosts, `harness init --yes` produces the layer, `harness doctor` passes, and a second run is a no-op; with one fake host the ladder in `harness.yaml` starts with that host; the generated `AGENTS.md` is at most 60 lines and names every pinned skill.
+**Acceptance:** in a temporary git repository with zero hosts, `harness init --yes` produces the layer, `harness doctor` passes, and a second run is a no-op; with one fake host the ladder in `harness.yaml` starts with that host; the generated `AGENTS.md` is at most 60 lines and names every pinned skill; in a repository that already has the layer, `harness init` touches no tracked file and writes only under `~/.config/harness/`; a fake Ollama reporting a model with zero VRAM produces the CPU-spill warning.
 
 - [ ] Plan, build, PR, gate, merge.
 
@@ -172,9 +176,9 @@ README.md                        the human guide
 
 **Interfaces:**
 - Consumes: `plan.md` step format from Task 8, `ladder.run` from Task 3.
-- Produces: `/harness-run` as a `/loop` skill; per tick: read `run.md`, pick ready steps (dependencies done, no file overlap with open steps), red by coordinator, green via `local-run`, critic gate (`critic.review(pr) -> Pass | Gap(text)`, up to three rounds, model per D8), PR via `gh`, merge, update `run.md`. `usage.read() -> fraction` and the threshold rule from D16; manual `budget: low` honoured. `harness status` table and `docs/harness/status.html` with the local versus Claude split.
+- Produces: `/harness-run` as a `/loop` skill; per tick: read `run.md`, pick ready steps (dependencies done, no file overlap with open steps), red by coordinator, green via `local-run`, critic gate (`critic.review(pr) -> Pass | Gap(text)`, up to three rounds, model per D8), PR via `gh`, merge, update `run.md`. `usage.read() -> fraction` and the threshold rule from D16; manual `budget: low` honoured. Each step writes `docs/harness/stats/<step-id>.json` on its own branch (rung, runner, host class, model, tokens in/out, ms, lines, critic rounds) per D17. `harness status` aggregates the directory into a table and `docs/harness/status.html` with the local versus free tier versus Claude split. On an exhausted subscription window the loop sleeps until the reset time.
 
-**Acceptance:** with a three-step fake plan where step 2 depends on step 1 and step 3 overlaps step 1's files, one tick opens exactly one PR; a critic returning two gaps then pass results in three rounds and a merge; usage above threshold skips critic calls and only local rungs run; killing the process mid-tick and running again resumes with no duplicate PR.
+**Acceptance:** with a three-step fake plan where step 2 depends on step 1 and step 3 overlaps step 1's files, one tick opens exactly one PR; a critic returning two gaps then pass results in three rounds and a merge; usage above threshold skips critic calls and only local rungs run; killing the process mid-tick and running again resumes with no duplicate PR; two steps merged from parallel branches leave two stats files and no conflict; `harness status` shows the split by rung class.
 
 - [ ] Plan, build, PR, gate, merge.
 

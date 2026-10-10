@@ -12,6 +12,43 @@ switched off.
 Status: design accepted, implementation in progress. See [the roadmap](docs/harness/roadmap.md)
 for what exists today and [the design](docs/harness/design.md) for every decision and why.
 
+## Quick start
+
+Once per machine:
+
+```sh
+# 1. Claude Code and the plugin
+claude plugin marketplace add mwo-dk/ai-harness
+claude plugin install ai-harness@ai-harness
+
+# 2. The command-line tools (Python, through uv)
+uv tool install git+https://github.com/mwo-dk/ai-harness
+
+# 3. Optional: tell this machine about local model servers and free-tier providers.
+#    Skip both if you only have Claude. harness init writes these files for you through
+#    a short wizard, so you do not have to hand-write them.
+harness doctor
+```
+
+Once per project, new or existing:
+
+```sh
+gh repo create <you>/<project> --private --clone    # or clone an existing one
+cd <project>
+harness init          # detects, asks a few questions, writes the layer, protects main
+claude                # open the coordinator session in the repository
+```
+
+Then, inside Claude Code:
+
+```
+/grill-with-docs      # one question at a time until spec, architecture, plan and bar exist
+/harness-run          # builds the plan as small PRs, resumable, until the plan is empty
+```
+
+Joining a project someone else started is the same: clone, `harness init`, `claude`. The
+command notices the layer is already there and only sets up your machine.
+
 ## The idea in one picture
 
 ```
@@ -62,7 +99,8 @@ Claude Code installed, and holds a checkout of the project. Hosts are described 
 | Claude Code only | The ladder starts at a Haiku subagent, then Sonnet, then the coordinator. The two local MCP servers answer "unavailable". Everything else is identical. |
 | One host | The host is rung one. Mechanical steps go there first. Bench results decide which of its models fills which role. |
 | Several hosts | Each host is a rung in order. Parallel steps can run one per host, on different files and branches. A weak host can be limited to embeddings only. |
-| Mixed team | Each person's machine has its own `hosts.yaml`. The project repository is the same for all. The plan records which rung landed each step, so you can see the split. |
+| Free cloud tiers | OpenCode Zen, Gemini, Kimi, DeepSeek and others are reached through OpenCode as a second runner. You opt in per provider in `~/.config/harness/providers.yaml` with a data-policy flag; providers that train on your code are skipped on private repositories unless the project allows it. |
+| Mixed team | Each person's machine has its own `hosts.yaml` and `providers.yaml`. The project repository is the same for all. Each step's PR carries a stats file saying which rung landed it, so the split is visible to everyone without any shared service. |
 
 Example `hosts.yaml` with two hosts, one strong and one weak:
 
@@ -131,16 +169,20 @@ plugins:
 - The critic never shares a model tier with the builder it judges.
 - Local models do embeddings, summaries, extraction, classification and first drafts. They do
   not plan, review or judge.
-- When subscription usage passes the threshold, only local rungs run and critics pause.
+- When subscription usage passes the threshold, only local rungs run and critics pause. When a
+  free tier or the subscription is exhausted, that rung cools down until its window resets and
+  the loop carries on with the rest.
 
 ## Where things live
 
 ```
-~/.config/harness/hosts.yaml    per machine, never committed
+~/.config/harness/hosts.yaml      per machine, never committed
+~/.config/harness/providers.yaml  per user, free and paid cloud tiers, never committed
 <project>/harness.yaml          roles, ladder, bar, pinned plugin versions
 <project>/AGENTS.md             the brief every agent reads, 60 lines at most
 <project>/.agents/skills/       project skills; .claude/skills links here
 <project>/docs/harness/         spec, architecture, plan, bar, run state, model bench
+<project>/docs/harness/stats/   one small file per step: rung, model, tokens, lines
 ~/wt/<repo>/<branch>            worktrees on every host
 ~/.local/state/harness/         run logs
 ```
